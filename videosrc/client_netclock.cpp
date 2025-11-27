@@ -4,6 +4,7 @@
 #include <csignal>
 #include <thread>
 #include <chrono>
+#include <atomic>
 
 static GMainLoop* main_loop = nullptr;
 
@@ -54,7 +55,6 @@ static void handle_sigint(int) {
     }
 }
 
-// callback pra rtspsrc pad-added (vídeo H.264)
 static void on_pad_added(GstElement* src, GstPad* new_pad, gpointer user_data) {
     (void)src;
     GstElement* depay = GST_ELEMENT(user_data);
@@ -79,7 +79,6 @@ static void on_pad_added(GstElement* src, GstPad* new_pad, gpointer user_data) {
     std::cout << "[CLIENT] Novo pad em rtspsrc: " << name << std::endl;
 
     if (g_str_has_prefix(name, "application/x-rtp")) {
-        // assumindo que é o vídeo H.264 do nosso stream
         if (gst_pad_link(new_pad, sinkpad) != GST_PAD_LINK_OK) {
             std::cerr << "[CLIENT] Falha ao linkar rtspsrc -> depay." << std::endl;
         } else {
@@ -103,19 +102,18 @@ int main(int argc, char* argv[]) {
     std::cout << "[CLIENT] RTSP URL: " << rtsp_url << std::endl;
     std::cout << "[CLIENT] Net clock: " << clock_host << ":" << clock_port << std::endl;
 
-    // 1) NetClientClock
+    // NetClientClock (clock do servidor visto pelo cliente)
     GstClock* net_clock = gst_net_client_clock_new(
         "net-clock",
         clock_host,
         clock_port,
-        0    // base-time local
+        0
     );
     if (!net_clock) {
         std::cerr << "[CLIENT] Falha ao criar GstNetClientClock." << std::endl;
         return 1;
     }
 
-    // Espera sincronizar (5s)
     GstClockTime timeout = 5 * GST_SECOND;
     gboolean synced = gst_clock_wait_for_sync(net_clock, timeout);
     if (!synced) {
@@ -125,7 +123,7 @@ int main(int argc, char* argv[]) {
     }
     std::cout << "[CLIENT] NetClientClock sincronizado." << std::endl;
 
-    // 2) Pipeline: rtspsrc -> rtph264depay -> avdec_h264 -> videoconvert -> autovideosink
+    // Pipeline: rtspsrc -> rtph264depay -> avdec_h264 -> videoconvert -> autovideosink
     GstElement* pipeline = gst_pipeline_new("video-client");
     if (!pipeline) {
         std::cerr << "[CLIENT] Falha ao criar pipeline." << std::endl;
@@ -133,10 +131,10 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    GstElement* src   = gst_element_factory_make("rtspsrc", "src");
-    GstElement* depay = gst_element_factory_make("rtph264depay", "depay");
-    GstElement* dec   = gst_element_factory_make("avdec_h264", "dec");
-    GstElement* conv  = gst_element_factory_make("videoconvert", "conv");
+    GstElement* src   = gst_element_factory_make("rtspsrc",       "src");
+    GstElement* depay = gst_element_factory_make("rtph264depay",  "depay");
+    GstElement* dec   = gst_element_factory_make("avdec_h264",    "dec");
+    GstElement* conv  = gst_element_factory_make("videoconvert",  "conv");
     GstElement* sink  = gst_element_factory_make("autovideosink", "sink");
 
     if (!src || !depay || !dec || !conv || !sink) {
@@ -163,11 +161,10 @@ int main(int argc, char* argv[]) {
 
     g_signal_connect(src, "pad-added", G_CALLBACK(on_pad_added), depay);
 
-    // 3) Usa o clock de rede no pipeline
+    // Usa o relógio de rede no pipeline
     gst_pipeline_use_clock(GST_PIPELINE(pipeline), net_clock);
-    gst_element_set_start_time(pipeline, GST_CLOCK_TIME_NONE);
 
-    // 4) Bus + loop
+    // Bus + loop
     GstBus* bus = gst_element_get_bus(pipeline);
     gst_bus_add_watch(bus, bus_callback, pipeline);
     gst_object_unref(bus);
@@ -175,35 +172,75 @@ int main(int argc, char* argv[]) {
     main_loop = g_main_loop_new(nullptr, FALSE);
     std::signal(SIGINT, handle_sigint);
 
+    std::atomic<bool> running{true};
+
+    // Clock local do sistema (pra comparar com o net_clock)
+    GstClock* sys_clock = gst_system_clock_obtain();
+
+    // Thread de sync – UM PRINT por segundo
+    std::thread syncThread([&]() {
+        while (running) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+
+            GstClockTime net_t = gst_clock_get_time(net_clock);   // tempo do servidor
+            GstClockTime sys_t = gst_clock_get_time(sys_clock);   // tempo local
+            gdouble net_s = (gdouble)net_t / 1e9;
+            gdouble sys_s = (gdouble)sys_t / 1e9;
+            gdouble delta = (gdouble)(sys_t - net_t) / 1e9;       // client - server
+
+            gint64 pos = 0;
+            gdouble pos_s = 0.0;
+            if (gst_element_query_position(pipeline, GST_FORMAT_TIME, &pos)) {
+                pos_s = (gdouble)pos / 1e9;
+            }
+
+            std::cout << "[SYNC] net=" << net_s
+                      << " s | sys=" << sys_s
+                      << " s | delta=" << delta
+                      << " s | pos=" << pos_s << " s" << std::endl;
+        }
+    });
+
+    // Vai para PLAYING
     GstStateChangeReturn ret = gst_element_set_state(pipeline, GST_STATE_PLAYING);
     if (ret == GST_STATE_CHANGE_FAILURE) {
         std::cerr << "[CLIENT] Não entrou em PLAYING." << std::endl;
+        running = false;
+        if (syncThread.joinable()) syncThread.join();
+
+        gst_object_unref(sys_clock);
         gst_object_unref(pipeline);
         gst_object_unref(net_clock);
         g_main_loop_unref(main_loop);
+        main_loop = nullptr;
         return 1;
     }
 
-    // Thread opcional pra logar posição
-    std::thread posThread([pipeline]() {
-        while (true) {
-            std::this_thread::sleep_for(std::chrono::seconds(1));
-            GstState state;
-            gst_element_get_state(pipeline, &state, nullptr, 0);
-            if (state != GST_STATE_PLAYING) break;
-            gint64 pos = 0;
-            if (gst_element_query_position(pipeline, GST_FORMAT_TIME, &pos)) {
-                std::cout << "[CLIENT] Posição ~ " << (pos / 1e9) << " s" << std::endl;
-            }
+    // Só pra confirmar que o pipeline está usando o net_clock
+    {
+        GstClock* pipeline_clock = gst_pipeline_get_clock(GST_PIPELINE(pipeline));
+        if (pipeline_clock) {
+            std::cout << "[CLIENT] Tipo do clock do pipeline: "
+                      << G_OBJECT_TYPE_NAME(pipeline_clock) << std::endl;
+            std::cout << "[CLIENT] Tipo do net_clock:         "
+                      << G_OBJECT_TYPE_NAME(net_clock) << std::endl;
+            std::cout << "[CLIENT] Mesmo ponteiro? "
+                      << (pipeline_clock == net_clock ? "SIM" : "NAO") << std::endl;
+            gst_object_unref(pipeline_clock);
+        } else {
+            std::cout << "[CLIENT] Pipeline não tem clock (NULL)." << std::endl;
         }
-    });
+    }
 
     std::cout << "[CLIENT] Rodando. Ctrl+C para sair." << std::endl;
     g_main_loop_run(main_loop);
 
-    if (posThread.joinable()) posThread.join();
+    // Encerrando
+    running = false;
+    if (syncThread.joinable()) syncThread.join();
 
     gst_element_set_state(pipeline, GST_STATE_NULL);
+    gst_object_unref(sys_clock);
     gst_object_unref(pipeline);
     gst_object_unref(net_clock);
     g_main_loop_unref(main_loop);

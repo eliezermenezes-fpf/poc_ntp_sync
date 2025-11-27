@@ -27,18 +27,8 @@ static gboolean bus_callback(GstBus* bus, GstMessage* msg, gpointer user_data) {
     }
     case GST_MESSAGE_EOS:
         std::cout << "[SERVER] EOS (fim do arquivo)." << std::endl;
-
-        // Se quiser loopar o vídeo:
-        if (!gst_element_seek_simple(pipeline,
-                                     GST_FORMAT_TIME,
-                                     (GstSeekFlags)(GST_SEEK_FLAG_FLUSH | GST_SEEK_FLAG_KEY_UNIT),
-                                     0)) {
-            std::cerr << "[SERVER] Falha ao fazer seek pra loop, encerrando." << std::endl;
-            gst_element_set_state(pipeline, GST_STATE_NULL);
-            if (main_loop) g_main_loop_quit(main_loop);
-        } else {
-            std::cout << "[SERVER] Loopando vídeo (seek 0)." << std::endl;
-        }
+        gst_element_set_state(pipeline, GST_STATE_NULL);
+        if (main_loop) g_main_loop_quit(main_loop);
         break;
     case GST_MESSAGE_STATE_CHANGED:
         if (GST_MESSAGE_SRC(msg) == GST_OBJECT(pipeline)) {
@@ -62,7 +52,6 @@ static void handle_sigint(int) {
     }
 }
 
-// decodebin → escolhemos só o vídeo
 static void on_decodebin_pad_added(GstElement* decodebin, GstPad* new_pad, gpointer user_data) {
     (void)decodebin;
     GstElement* queue = GST_ELEMENT(user_data);
@@ -105,24 +94,42 @@ int main(int argc, char* argv[]) {
 
     if (argc < 2) {
         std::cerr << "Uso: " << argv[0]
-                  << " <caminho_video> [rtsp_url] [clock_port]\n"
+                  << " <caminho_video> [rtsp_url] [clock_port] [offset_segundos]\n"
                   << "Exemplo: " << argv[0]
-                  << " video.mp4 rtsp://0.0.0.0:8555/mystream 8557\n";
+                  << " video.mp4 rtsp://0.0.0.0:8555/mystream 8557 5\n";
         return 1;
     }
 
     const char* video_path = argv[1];
     const char* rtsp_url   = (argc > 2) ? argv[2] : "rtsp://127.0.0.1:8555/mystream";
     int clock_port         = (argc > 3) ? std::stoi(argv[3]) : 8557;
+    int offset_sec         = (argc > 4) ? std::stoi(argv[4]) : 0;  // offset artificial
 
     std::cout << "[SERVER] Arquivo de vídeo: " << video_path << std::endl;
     std::cout << "[SERVER] Publicando em: " << rtsp_url << std::endl;
     std::cout << "[SERVER] Servindo clock em UDP porta: " << clock_port << std::endl;
+    std::cout << "[SERVER] Offset artificial do clock: " << offset_sec << " s" << std::endl;
 
-    // 1) Clock mestre
+    // Clock mestre
     GstClock* clock = gst_system_clock_obtain();
 
-    // 2) NetTimeProvider
+    // Se quiser forçar um offset artificial, usamos calibração
+    if (offset_sec != 0) {
+        GstClockTime internal = gst_clock_get_internal_time(clock);
+        GstClockTime external = internal + (GstClockTime)offset_sec * GST_SECOND;
+
+        // rate_num/rate_denom = 1/1 (mesma velocidade, só com offset)
+        gst_clock_set_calibration(clock,
+                                  internal,  // internal_base
+                                  external,  // external_base
+                                  1,         // rate_num
+                                  1);        // rate_denom
+
+        std::cout << "[SERVER] Calibração aplicada: external = internal + "
+                  << offset_sec << " s" << std::endl;
+    }
+
+    // NetTimeProvider
     GstNetTimeProvider* net_provider = gst_net_time_provider_new(
         clock,
         "0.0.0.0",
@@ -134,22 +141,17 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // 3) Pipeline
+    // Pipeline: filesrc → decodebin → queue → videoconvert → videoscale → identity(sync=true) → x264enc → rtspclientsink
     GstElement* pipeline = gst_pipeline_new("video-file-service");
 
-    GstElement* filesrc  = gst_element_factory_make("filesrc", "filesrc");
-    GstElement* decode   = gst_element_factory_make("decodebin", "decode");
-    // GstElement* queue    = gst_element_factory_make("queue", "queue");
-    // GstElement* convert  = gst_element_factory_make("videoconvert", "convert");
-    // GstElement* scale    = gst_element_factory_make("videoscale", "scale");
-    // GstElement* enc      = gst_element_factory_make("x264enc", "enc");
-    // GstElement* sink     = gst_element_factory_make("rtspclientsink", "sink");
-    GstElement* queue    = gst_element_factory_make("queue", "queue");
-    GstElement* convert  = gst_element_factory_make("videoconvert", "convert");
-    GstElement* scale    = gst_element_factory_make("videoscale", "scale");
-    GstElement* ident    = gst_element_factory_make("identity", "pacer");
-    GstElement* enc      = gst_element_factory_make("x264enc", "enc");
-    GstElement* sink     = gst_element_factory_make("rtspclientsink", "sink");
+    GstElement* filesrc  = gst_element_factory_make("filesrc",       "filesrc");
+    GstElement* decode   = gst_element_factory_make("decodebin",     "decode");
+    GstElement* queue    = gst_element_factory_make("queue",         "queue");
+    GstElement* convert  = gst_element_factory_make("videoconvert",  "convert");
+    GstElement* scale    = gst_element_factory_make("videoscale",    "scale");
+    GstElement* ident    = gst_element_factory_make("identity",      "pacer");
+    GstElement* enc      = gst_element_factory_make("x264enc",       "enc");
+    GstElement* sink     = gst_element_factory_make("rtspclientsink","sink");
 
     if (!pipeline || !filesrc || !decode || !queue ||
         !convert || !scale || !ident || !enc || !sink) {
@@ -164,23 +166,21 @@ int main(int argc, char* argv[]) {
                  "location", video_path,
                  NULL);
 
-    // <<< AQUI FOI CORRIGIDO >>>
+    g_object_set(ident,
+                 "sync", TRUE,
+                 NULL);
+
     g_object_set(enc,
                  "bitrate", 800,  // kbps
                  NULL);
-
-    // identity que faz pacing em tempo real
-    g_object_set(ident,
-             "sync", TRUE,
-             NULL);
 
     g_object_set(sink,
                  "location", rtsp_url,
                  NULL);
 
     gst_bin_add_many(GST_BIN(pipeline),
-                 filesrc, decode, queue, convert, scale, ident, enc, sink,
-                 NULL);
+                     filesrc, decode, queue, convert, scale, ident, enc, sink,
+                     NULL);
 
     if (!gst_element_link(filesrc, decode)) {
         std::cerr << "[SERVER] Falha ao linkar filesrc -> decodebin." << std::endl;
@@ -200,11 +200,10 @@ int main(int argc, char* argv[]) {
 
     g_signal_connect(decode, "pad-added", G_CALLBACK(on_decodebin_pad_added), queue);
 
-    // 4) Usa o mesmo clock que estamos servindo via rede
+    // Usa o mesmo clock calibrado no pipeline
     gst_pipeline_use_clock(GST_PIPELINE(pipeline), clock);
-    // gst_element_set_start_time(pipeline, GST_CLOCK_TIME_NONE);
 
-    // 5) Bus + loop
+    // Bus + loop
     GstBus* bus = gst_element_get_bus(pipeline);
     gst_bus_add_watch(bus, bus_callback, pipeline);
     gst_object_unref(bus);
@@ -219,6 +218,7 @@ int main(int argc, char* argv[]) {
         g_object_unref(net_provider);
         gst_object_unref(clock);
         g_main_loop_unref(main_loop);
+        main_loop = nullptr;
         return 1;
     }
 
