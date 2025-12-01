@@ -5,7 +5,6 @@
 
 static GMainLoop* main_loop = nullptr;
 
-// Porta fixa para o clock de rede
 static const int CLOCK_PORT = 8557;
 
 static gboolean bus_callback(GstBus* bus, GstMessage* msg, gpointer user_data) {
@@ -102,12 +101,12 @@ int main(int argc, char* argv[]) {
             << " <caminho_video> [rtsp_url]\n"
             << "Exemplo:\n"
             << "  " << argv[0] << " video.mp4\n"
-            << "  " << argv[0] << " video.mp4 rtsp://0.0.0.0:8555/live\n";
+            << "  " << argv[0] << " video.mp4 rtsp://0.0.0.0:8555/stream\n";
         return 1;
     }
 
     const char* video_path = argv[1];
-    const char* rtsp_url   = (argc > 2) ? argv[2] : "rtsp://0.0.0.0:8555/live";
+    const char* rtsp_url   = (argc > 2) ? argv[2] : "rtsp://0.0.0.0:8555/stream";
 
     std::cout << "[SERVER] Arquivo de vídeo: " << video_path << std::endl;
     std::cout << "[SERVER] Publicando em: " << rtsp_url << std::endl;

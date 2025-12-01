@@ -69,7 +69,7 @@ Dispositivo B: CLIENTE (client_netclock*)
 
    Rodar:
    ```bash
-   ./server_netclock_overlay /home/eliezer/Workspace/tpv/poc_ntp_sync/videosrc/elephants_dream_sample.mp4 rtsp://0.0.0.0:8555 8557
+   ./server_netclock_overlay /home/eliezer/Workspace/tpv/poc_ntp_sync/videosrc/elephants_dream_sample.mp4 rtsp://0.0.0.0:8555/stream 8557
    ```
    RTSP: rtsp://HOST_IP:8555
    CLOCK: HOST_IP:8557 (o código bindou em 0.0.0.0:8557)

@@ -104,15 +104,15 @@ int main(int argc, char* argv[]) {
             << "  modo: 'net' (clock de rede), 'sys' (clock local), 'bad' (clock local driftado)\n"
             << "\n"
             << "Parâmetros:\n"
-            << "  rtsp_url     = URL RTSP (ex.: rtsp://HOST:8555/mystream)\n"
+            << "  rtsp_url     = URL RTSP (ex.: rtsp://HOST:8000/stream)\n"
             << "  clock_host   = host/IP do GstNetTimeProvider (normalmente o HOST do RTSP)\n"
-            << "  clock_port   = porta UDP do clock (ex.: 8557)\n"
+            << "  clock_port   = porta UDP do clock (ex.: 3000)\n"
             << "  bad_rate_num/den = (apenas modo 'bad') drift do clock local (default 1001/1000)\n"
             << "\n"
             << "Exemplos:\n"
-            << "  " << argv[0] << " net rtsp://127.0.0.1:8555/mystream 127.0.0.1 8557\n"
-            << "  " << argv[0] << " sys rtsp://127.0.0.1:8555/mystream 127.0.0.1 8557\n"
-            << "  " << argv[0] << " bad rtsp://127.0.0.1:8555/mystream 127.0.0.1 8557 1001 1000\n";
+            << "  " << argv[0] << " net rtsp://127.0.0.1:8000/stream 127.0.0.1 3000\n"
+            << "  " << argv[0] << " sys rtsp://127.0.0.1:8000/stream 127.0.0.1 3000\n"
+            << "  " << argv[0] << " bad rtsp://127.0.0.1:8000/stream 127.0.0.1 3000 1001 1000\n";
         return 1;
     }
 
@@ -122,9 +122,9 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    const char* rtsp_url   = (argc > 2) ? argv[2] : "rtsp://127.0.0.1:8555/mystream";
+    const char* rtsp_url   = (argc > 2) ? argv[2] : "rtsp://127.0.0.1:8000/stream";
     const char* clock_host = (argc > 3) ? argv[3] : "127.0.0.1";
-    int clock_port         = (argc > 4) ? std::stoi(argv[4]) : 8557;
+    int clock_port         = (argc > 4) ? std::stoi(argv[4]) : 3000;
     int bad_rate_num       = (argc > 5) ? std::stoi(argv[5]) : 1001;
     int bad_rate_den       = (argc > 6) ? std::stoi(argv[6]) : 1000;
 
