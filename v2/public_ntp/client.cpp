@@ -76,7 +76,23 @@ int main(int argc, char* argv[]) {
     std::cout << "[CLIENT] rtpjitterbuffer latency: " << jitter_latency << " ms" << std::endl;
     std::cout << "[CLIENT] =========================================" << std::endl;
 
-    // Sincroniza com o MESMO NTP público do servidor
+    /* ============================================================================
+     * SINCRONIZAÇÃO COM O MESMO NTP DO SERVIDOR
+     * ============================================================================
+     * O cliente DEVE usar exatamente o MESMO servidor NTP que o servidor usa.
+     * 
+     * POR QUÊ?
+     * - Servidor usa a.st1.ntp.br para gerar timestamps no stream
+     * - Cliente usa a.st1.ntp.br para interpretar esses timestamps
+     * - Se usassem NTPs diferentes, os timestamps não fariam sentido
+     * 
+     * EXEMPLO:
+     * - Servidor pega tempo do NTP A: 15:30:00.000
+     * - Servidor marca frame com timestamp: 15:30:00.000
+     * - Cliente pega tempo do NTP A: 15:30:00.050 (50ms depois)
+     * - Cliente sabe que frame tem 50ms de atraso
+     *
+     * ============================================================================ */
     GstClock* ntp_clock = gst_ntp_clock_new("ntp-client", NTP_HOST, NTP_PORT, 0);
     if (!ntp_clock) {
         std::cerr << "[CLIENT] Falha ao criar GstNtpClock." << std::endl;
@@ -92,7 +108,32 @@ int main(int argc, char* argv[]) {
 
     GstClock* sys_clock = gst_system_clock_obtain();
 
-    // Pipeline: rtspsrc -> rtpjitterbuffer -> rtpmp4adepay -> aacparse -> avdec_aac -> audioconvert -> audioresample -> autoaudiosink
+    /* ============================================================================
+     * PIPELINE DE RECEPÇÃO RTSP - PARÂMETROS IMPORTANTES
+     * ============================================================================
+     * 
+     * rtspsrc: Elemento que se conecta ao servidor RTSP e recebe o stream
+     *   - location: URL do stream RTSP
+     *   - latency: Buffer interno do rtspsrc (ajuste conforme a rede)
+     *   - ntp-sync=true: CRUCIAL! Usa timestamps NTP do servidor
+     *   - ntp-time-source=3: Usa tempo NTP para sincronização
+     *   - buffer-mode=1: Modo de buffer otimizado para streaming
+     * 
+     * rtpjitterbuffer: Compensa variações de latência da rede (jitter)
+     *   - latency: Tamanho do buffer de compensação
+     *   - Maior latency = mais suave, mas mais delay
+     *   - Menor latency = mais responsivo, mas pode ter cortes
+     * 
+     * rtpmp4adepay: Remove cabeçalhos RTP do stream AAC
+     * 
+     * aacparse: Analisa e valida frames AAC
+     * 
+     * avdec_aac: Decodifica AAC para áudio raw
+     * 
+     * audioconvert + audioresample: Ajustam formato para o sink
+     * 
+     * autoaudiosink: Envia para placa de som (PulseAudio, ALSA, etc.)
+     * ============================================================================ */
     gchar* pipeline_desc = g_strdup_printf(
         "rtspsrc location=\"%s\" name=src latency=%ld ntp-sync=true ntp-time-source=3 buffer-mode=1 "
         "! rtpjitterbuffer latency=%ld "
@@ -119,7 +160,16 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Usar NTP clock no pipeline
+    /* ============================================================================
+     * APLICAR O CLOCK NTP AO PIPELINE
+     * ============================================================================
+     * Assim como no servidor, forçamos o pipeline a usar o NTP clock.
+     * 
+     * RESULTADO:
+     * - Servidor e cliente agora compartilham a mesma referência de tempo
+     * - Os timestamps do stream fazem sentido para o cliente
+     * - A reprodução pode ser sincronizada com precisão
+     * ============================================================================ */
     gst_pipeline_use_clock(GST_PIPELINE(pipeline), ntp_clock);
     gst_pipeline_set_latency(GST_PIPELINE(pipeline), 2 * GST_SECOND);
 
@@ -132,6 +182,22 @@ int main(int argc, char* argv[]) {
 
     std::atomic<bool> running{true};
 
+    /* ============================================================================
+     * THREAD DE MONITORAMENTO
+     * ============================================================================
+     * Esta thread roda em paralelo e imprime informações de sincronização a cada 1s.
+     * 
+     * MÉTRICAS MOSTRADAS:
+     * - ntp: Tempo atual do clock NTP (em segundos desde epoch)
+     * - sys: Tempo do system clock (relógio do computador)
+     * - delta: Diferença entre sys e ntp (quanto o relógio local está adiantado/atrasado)
+     * - pos: Posição atual da reprodução no pipeline (tempo do stream)
+     * 
+     * DELTA IDEAL:
+     * - Deve ser estável (não variar muito)
+     * - Pode ser positivo ou negativo (normal)
+     * - Se variar muito (>1s), pode indicar problemas de sincronização
+     * ============================================================================ */
     std::thread syncThread([&]() {
         while (running) {
             std::this_thread::sleep_for(std::chrono::seconds(1));

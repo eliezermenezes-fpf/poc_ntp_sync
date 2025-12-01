@@ -76,10 +76,53 @@ int main(int argc, char* argv[]) {
     std::cout << "[SERVER] Servidor é a referência de tempo (system clock)" << std::endl;
     std::cout << "[SERVER] =========================================" << std::endl;
 
-    // Usa system clock como referência
+    /* ============================================================================
+     * SERVIDOR NTP CUSTOMIZADO
+     * ============================================================================
+     * AQUI o servidor não sincroniza com NTP externo.
+     * Em vez disso, o SERVIDOR se torna a FONTE DE VERDADE do tempo!
+     * 
+     * COMO FUNCIONA:
+     * 1. Usamos o system clock do servidor como referência (gst_system_clock_obtain)
+     * 2. Criamos um NetTimeProvider que compartilha este clock via rede (porta 8557 UDP)
+     * 3. Clientes se conectam a esta porta e sincronizam COM O SERVIDOR
+     * 
+     * VANTAGENS:
+     * - Precisão máxima (< 1ms em LAN, não há intermediário)
+     * - Não depende de internet ou servidores externos
+     * - Controle total sobre a referência de tempo
+     * 
+     * DESVANTAGENS:
+     * - Requer que clientes acessem a porta 8557 UDP do servidor
+     * - Não funciona bem através de NAT/firewall complexo (use VPN nesses casos)
+     * - Limitado a rede local sem configuração adicional
+     * 
+     * CENÁRIO IDEAL:
+     * - Servidor e clientes na mesma LAN/WiFi
+     * - OU conectados via VPN
+     * ============================================================================ */
     GstClock* master_clock = gst_system_clock_obtain();
     
-    // Cria NetTimeProvider para compartilhar o clock com clientes
+    /* ============================================================================
+     * NetTimeProvider - COMPARTILHANDO O CLOCK VIA REDE
+     * ============================================================================
+     * 
+     * PARÂMETROS:
+     * - master_clock: O clock que será compartilhado (system clock do servidor)
+     * - "0.0.0.0": Escuta em TODAS as interfaces de rede (WiFi, Ethernet, etc.)
+     * - CLOCK_PORT (8557): Porta UDP onde os clientes vão se conectar
+     * 
+     * O QUE FAZ:
+     * - Abre um socket UDP na porta 8557
+     * - Quando um cliente envia uma requisição, responde com o tempo atual
+     * - Usa protocolo similar ao NTP para compensar latência de rede
+     * - Múltiplos clientes podem conectar simultaneamente
+     * 
+     * IMPORTANTE:
+     * - Esta porta precisa estar aberta no firewall
+     * - Clientes precisam saber o IP do servidor
+     *
+     * ============================================================================ */
     GstNetTimeProvider* net_provider = gst_net_time_provider_new(
         master_clock,
         "0.0.0.0",  // Escuta em todas as interfaces
@@ -95,7 +138,17 @@ int main(int argc, char* argv[]) {
     std::cout << "[SERVER] ✓ NetTimeProvider ativo na porta " << CLOCK_PORT << " UDP" << std::endl;
     std::cout << "[SERVER] ✓ Clientes devem conectar em: <IP_SERVIDOR>:" << CLOCK_PORT << std::endl;
 
-    // Pipeline: filesrc -> decodebin -> queue -> audioconvert -> audioresample -> avenc_aac -> rtspclientsink
+    /* ============================================================================
+     * PIPELINE
+     * ============================================================================
+     * 
+     * filesrc → decodebin → queue → audioconvert → audioresample → avenc_aac → rtspclientsink
+     * 
+     * A ÚNICA diferença entre servidor público e customizável está no CLOCK usado:
+     * - Versão pública: usa NTP clock externo
+     * - Versão customizada: usa system clock local (que é compartilhado via NetTimeProvider)
+     *
+     * ============================================================================ */
     GstElement* pipeline = gst_pipeline_new("audio-server");
     GstElement* filesrc = gst_element_factory_make("filesrc", "filesrc");
     GstElement* decode = gst_element_factory_make("decodebin", "decode");
@@ -159,6 +212,21 @@ int main(int argc, char* argv[]) {
         gst_object_unref(sinkpad);
     }), queue);
 
+    /* ============================================================================
+     * USANDO O CLOCK DO SERVIDOR (MASTER CLOCK)
+     * ============================================================================
+     * Aqui configuramos o pipeline para usar o master_clock (system clock).
+     * 
+     * FLUXO COMPLETO:
+     * 1. Pipeline usa master_clock para gerar timestamps
+     * 2. NetTimeProvider compartilha este clock na porta 8557
+     * 3. Clientes se conectam e obtêm uma cópia sincronizada do clock
+     * 4. Clientes interpretam timestamps do stream usando este clock sincronizado
+     * 
+     * RESULTADO:
+     * - Servidor e clientes têm exatamente a mesma noção de tempo
+     * - Precisão limitada apenas pela latência da rede local (geralmente < 1ms)
+     * ============================================================================ */
     gst_pipeline_use_clock(GST_PIPELINE(pipeline), master_clock);
     gst_pipeline_set_latency(GST_PIPELINE(pipeline), 2 * GST_SECOND);
 

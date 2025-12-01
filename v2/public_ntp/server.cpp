@@ -77,13 +77,35 @@ int main(int argc, char* argv[]) {
     std::cout << "[SERVER] Sincronizando com NTP: " << NTP_HOST << std::endl;
     std::cout << "[SERVER] =========================================" << std::endl;
 
-    // Sincroniza com NTP público
+    /* ============================================================================
+     * SINCRONIZAÇÃO COM NTP PÚBLICO - CONCEITO CHAVE
+     * ============================================================================
+     * Esta versão usa um servidor NTP EXTERNO (a.st1.ntp.br) como referência de tempo.
+     * 
+     * COMO FUNCIONA:
+     * - Tanto o servidor quanto o cliente se conectam ao MESMO servidor NTP público
+     * - Ambos obtêm timestamps baseados nessa referência externa compartilhada
+     * - Isso garante que estejam "na mesma página" em termos de tempo
+     * 
+     * VANTAGENS:
+     * - Funciona mesmo que servidor e cliente estejam em redes diferentes
+     * - Não precisa abrir portas no firewall do servidor
+     * - Múltiplos servidores podem sincronizar entre si
+     * 
+     * DESVANTAGENS:
+     * - Precisão limitada (~50-200ms dependendo da distância do servidor NTP)
+     * - Depende de acesso à internet
+     * - Latência variável
+     * 
+     * IMPORTANTE: O cliente DEVE usar o MESMO servidor NTP (a.st1.ntp.br)
+     * ============================================================================ */
     GstClock* ntp_clock = gst_ntp_clock_new("ntp-server", NTP_HOST, NTP_PORT, 0);
     if (!ntp_clock) {
         std::cerr << "[SERVER] Falha ao criar GstNtpClock." << std::endl;
         return 1;
     }
 
+    // Aguarda até que o clock sincronize com o servidor NTP (timeout de 5 segundos)
     if (!gst_clock_wait_for_sync(ntp_clock, 5 * GST_SECOND)) {
         std::cerr << "[SERVER] NtpClock não sincronizou em 5s." << std::endl;
         gst_object_unref(ntp_clock);
@@ -91,7 +113,32 @@ int main(int argc, char* argv[]) {
     }
     std::cout << "[SERVER] ✓ Sincronizado com " << NTP_HOST << std::endl;
 
-    // Pipeline: filesrc -> decodebin -> queue -> audioconvert -> audioresample -> avenc_aac -> rtspclientsink
+    /* ============================================================================
+     * PIPELINE DE ÁUDIO - ESTRUTURA MANUAL
+     * ============================================================================
+     * Criamos cada elemento individualmente para ter controle total sobre o fluxo e o clock.
+     * 
+     * FLUXO DO PIPELINE:
+     * 
+     * filesrc: Lê o arquivo de áudio do disco
+     *    ↓
+     * decodebin: Decodifica automaticamente qualquer formato (mp3, wav, flac, etc.)
+     *    ↓
+     * queue: Buffer para evitar bloqueios entre decodificação e processamento
+     *    ↓
+     * audioconvert: Converte o áudio para formato padrão (necessário para AAC)
+     *    ↓
+     * audioresample: Ajusta a taxa de amostragem para o que o encoder AAC aceita
+     *    ↓
+     * avenc_aac: Codifica o áudio em AAC (formato eficiente para streaming)
+     *    ↓
+     * rtspclientsink: Publica o áudio AAC em um servidor RTSP (mediamtx)
+     * 
+     * PONTO CRUCIAL:
+     * rtspclientsink espera receber dados JÁ CODIFICADOS (AAC, não RTP!).
+     * Ele mesmo faz o empacotamento RTP internamente. Por isso usamos avenc_aac
+     * ANTES do sink, não um payloader RTP.
+     * ============================================================================ */
     GstElement* pipeline = gst_pipeline_new("audio-server");
     GstElement* filesrc = gst_element_factory_make("filesrc", "filesrc");
     GstElement* decode = gst_element_factory_make("decodebin", "decode");
@@ -130,6 +177,23 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    /* ============================================================================
+     * PAD-ADDED CALLBACK - LINKING DINÂMICO
+     * ============================================================================
+     * decodebin é um elemento DINÂMICO: ele só cria pads de saída DEPOIS que
+     * detecta o tipo de mídia do arquivo.
+     * 
+     * FUNCIONAMENTO:
+     * 1. decodebin analisa o arquivo e detecta streams (áudio, vídeo, legendas)
+     * 2. Para cada stream, ele emite um sinal "pad-added" com um novo pad
+     * 3. Este callback é chamado e verifica se o pad é de áudio
+     * 4. Se for áudio, conecta ao queue para continuar o pipeline
+     * 
+     * VERIFICAÇÕES:
+     * - Se o sink do queue já está linkado, ignora (evita links duplicados)
+     * - Verifica os capabilities (caps) do pad para confirmar que é áudio
+     * - Só conecta se os caps começam com "audio/" (audio/x-raw, audio/mpeg, etc.)
+     * ============================================================================ */
     g_signal_connect(decode, "pad-added", G_CALLBACK(+[](GstElement*, GstPad* new_pad, gpointer data) {
         GstElement* queue = GST_ELEMENT(data);
         GstPad* sinkpad = gst_element_get_static_pad(queue, "sink");
@@ -152,6 +216,20 @@ int main(int argc, char* argv[]) {
         gst_object_unref(sinkpad);
     }), queue);
 
+    /* ============================================================================
+     * CONFIGURAÇÃO DO CLOCK NO PIPELINE - SINCRONIZAÇÃO
+     * ============================================================================
+     * 
+     * gst_pipeline_use_clock():
+     * - Força o pipeline a usar o NTP clock que criamos
+     * - TODOS os elementos do pipeline usarão este clock para timestamps
+     * - Como o cliente também usa o MESMO NTP, os timestamps serão compatíveis
+     * 
+     * gst_pipeline_set_latency():
+     * - Define a latência máxima aceitável do pipeline (2 segundos)
+     * - Isso dá tempo para buffers e processamento sem descartar dados
+     * - Importante para streaming ao vivo
+     * ============================================================================ */
     gst_pipeline_use_clock(GST_PIPELINE(pipeline), ntp_clock);
     gst_pipeline_set_latency(GST_PIPELINE(pipeline), 2 * GST_SECOND);
 

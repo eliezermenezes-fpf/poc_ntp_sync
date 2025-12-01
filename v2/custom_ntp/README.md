@@ -1,4 +1,4 @@
-# POC - Servidor NTP Customizado (NetTimeProvider)
+# NTP customizado (NetTimeProvider)
 
 ## Descrição
 

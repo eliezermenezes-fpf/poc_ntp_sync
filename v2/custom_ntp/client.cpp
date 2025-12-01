@@ -76,7 +76,33 @@ int main(int argc, char* argv[]) {
     std::cout << "[CLIENT] rtpjitterbuffer latency: " << jitter_latency << " ms" << std::endl;
     std::cout << "[CLIENT] =========================================" << std::endl;
 
-    // Conecta ao NetTimeProvider do servidor
+    /* ============================================================================
+     * NetClientClock - CONECTANDO AO SERVIDOR CUSTOMIZADO
+     * ============================================================================
+     * Em vez de GstNtpClock (que conecta a servidores NTP públicos), usamos
+     * GstNetClientClock que conecta ao NetTimeProvider do nosso servidor.
+     * 
+     * DIFERENÇA CHAVE:
+     * - GstNtpClock: usa protocolo NTP padrão, conecta a ntp.br, pool.ntp.org, etc.
+     * - GstNetClientClock: usa protocolo GStreamer, conecta ao nosso servidor
+     * 
+     * PARÂMETROS:
+     * - "net-client-clock": nome do clock (arbitrário)
+     * - SERVER_IP: IP do servidor onde está rodando o NetTimeProvider
+     * - SERVER_PORT: porta onde NetTimeProvider está escutando (8557)
+     * - 0: base time (0 = usar tempo atual)
+     * 
+     * O QUE FAZ:
+     * 1. Abre conexão UDP com o servidor na porta 8557
+     * 2. Envia requisições periódicas para obter o tempo do servidor
+     * 3. Compensa latência de rede automaticamente
+     * 4. Mantém sincronização contínua
+     * 
+     * IMPORTANTE:
+     * - SERVER_IP deve ser o IP real do servidor
+     * - Porta 8557 UDP deve estar acessível
+     * - Uso de VPN ou port forwarding caso esteja em rede diferente
+     * ============================================================================ */
     GstClock* net_clock = gst_net_client_clock_new(
         "net-client-clock",
         SERVER_IP,
@@ -89,6 +115,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    // Aguarda sincronização (pode demorar alguns segundos na primeira vez)
     if (!gst_clock_wait_for_sync(net_clock, 5 * GST_SECOND)) {
         std::cerr << "[CLIENT] NetClientClock não sincronizou em 5s." << std::endl;
         std::cerr << "[CLIENT] Verifique se o servidor está rodando em " 
@@ -100,7 +127,15 @@ int main(int argc, char* argv[]) {
 
     GstClock* sys_clock = gst_system_clock_obtain();
 
-    // Pipeline: rtspsrc -> rtpjitterbuffer -> rtpmp4adepay -> aacparse -> avdec_aac -> audioconvert -> audioresample -> autoaudiosink
+    /* ============================================================================
+     * PIPELINE DE RECEPÇÃO
+     * ============================================================================
+     * O pipeline é exatamente o mesmo da versão public_ntp.
+     * A única diferença é qual CLOCK estamos usando:
+     * 
+     * - Versão pública: usa GstNtpClock (servidor NTP externo)
+     * - Versão customizada: usa GstNetClientClock (conecta ao nosso servidor)
+     * ============================================================================ */
     gchar* pipeline_desc = g_strdup_printf(
         "rtspsrc location=\"%s\" name=src latency=%ld ntp-sync=true ntp-time-source=3 buffer-mode=1 "
         "! rtpjitterbuffer latency=%ld "
@@ -127,7 +162,30 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Usar clock do servidor no pipeline
+    /* ============================================================================
+     * APLICAR O CLOCK SINCRONIZADO AO PIPELINE
+     * ============================================================================
+     * Usamos o net_clock (que está sincronizado com o servidor via NetTimeProvider) no pipeline.
+     * 
+     * FLUXO DA SINCRONIZAÇÃO:
+     * 
+     * SERVIDOR:
+     * 1. Usa system clock para timestamps do stream
+     * 2. NetTimeProvider compartilha este clock na porta 8557
+     * 
+     * CLIENTE:
+     * 3. NetClientClock conecta ao servidor e sincroniza
+     * 4. Pipeline usa este clock sincronizado
+     * 5. Timestamps do stream fazem sentido porque estão na mesma "escala de tempo"
+     * 
+     * VANTAGEM:
+     * - Servidor e cliente têm praticamente o MESMO tempo (< 1ms de diferença em LAN)
+     * - Muito mais preciso que NTP público (que pode ter 50-200ms de diferença)
+     * 
+     * MONITORAMENTO:
+     * - A thread abaixo mostra o delta entre net_clock e sys_clock
+     * - Em LAN, espera-se delta < 0.001s (1ms)
+     * ============================================================================ */
     gst_pipeline_use_clock(GST_PIPELINE(pipeline), net_clock);
     gst_pipeline_set_latency(GST_PIPELINE(pipeline), 2 * GST_SECOND);
 
@@ -140,6 +198,18 @@ int main(int argc, char* argv[]) {
 
     std::atomic<bool> running{true};
 
+    /* ============================================================================
+     * THREAD DE MONITORAMENTO
+     * ============================================================================
+     * Mostra a cada 1 segundo:
+     * - net: tempo do clock sincronizado com o servidor
+     * - sys: tempo do system clock local
+     * - delta: diferença entre eles (deve ser muito pequeno em LAN!)
+     * - pos: posição da reprodução
+     * 
+     * VALORES ESPERADOS (LAN):
+     * - delta: entre -0.001 e 0.001 (< 1ms) - MUITO MELHOR que NTP público!
+     * ============================================================================ */
     std::thread syncThread([&]() {
         while (running) {
             std::this_thread::sleep_for(std::chrono::seconds(1));

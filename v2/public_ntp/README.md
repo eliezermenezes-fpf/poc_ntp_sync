@@ -1,4 +1,4 @@
-# POC - NTP Público (ntp.br)
+# NTP público (ntp.br)
 
 ## Descrição
 
@@ -14,7 +14,7 @@ Esta versão usa um servidor NTP público como referência de tempo compartilhad
 ## Como funciona
 
 ```
-Servidor NTP Público (a.st1.ntp.br)
+Servidor NTP público (a.st1.ntp.br)
             ↓                    ↓
       [Servidor]            [Cliente]
       Emulador TV           Celular
